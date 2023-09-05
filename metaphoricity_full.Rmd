@@ -1,0 +1,461 @@
+---
+title: "Analysis of metaphoricity ratings"
+author: "Bodo Winter & Francesca Strik Lievers"
+date: "19/04/2021"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This script is adapted from Winter & Strik Lievers (2023), "Semantic distance predicts metaphoricity and creativity judgments in synesthetic metaphors", published in *Metaphor and the Social World*.
+
+Here's a link to the paper: [https://doi.org/10.1075/msw.00029.win](https://doi.org/10.1075/msw.00029.win)
+
+And here's a link to the full repo that has all examples, very close to what we do in the script here: [https://osf.io/wcuqd/](https://osf.io/wcuqd/)
+
+Context for the experiment: in this experiment, we investigate what is called *linguistic synesthesia*, otherwise known as *synesthetic metaphors*. These are expressions that combine terms of two separate sensory modality, such as *sweet melody* and *rough sound*. In this study, we want to assess whether the semantic distance between two terms predicts metaphoricity ratings. That is, if the adjective and noun are of very different sensory modalities, they should be rated as more metaphoric. If they are very similar, e.g., both touch, then they should be rated as less metaphoric / more literal. We have a continuous measure of domain distance called cosine similarity, which in this case quantifies whether the adjective and the noun are of similar modalities (high cosines) or dissimilar modalities (low cosines). We have 50 adjective-noun pairs with cosine similarities continuously varying between 0 and 1.
+
+In addition, we wanted to assess the effect of whether the particular adjective-noun pair is attested in a corpus, and also control for the frequency of the adjective, as well as for the frequency in the noun.
+
+The main dependent measure is an ordinal (Likert) scale with 7 points, ranging from 1 (= very literal) to 7 (= very metaphoric). We then did the same experiment again (Experiment 2) with a creativity scale, raning from 1 (= very uncreative) to 7 (= very creative).
+
+We want to create three plots in this hands-on session:
+
+- A descriptive plot showing how many responses for each scale point there were for different levels of the ordinal scale
+- Next to it, a plot of the coefficients from the ordinal mixed model we fitted
+- Additionally, a scatter plot to look at the mean metaphoricity ratings for each pair, and to see what that is correlated with the mean creativity ratings from Experiment 2
+
+Load packages. In the code chunk, we use `message = FALSE` and `warning = FALSE` to make sure that the package loading messages are suppressed in the knitted markdown document. They will also be suppressed for the next section, where we equally don't need it.
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)    # for all data processing and visualization
+library(brms)         # for bayesian regression models with Stan
+library(ggridges)     # additional geoms for joy plot
+library(patchwork)    # for multi plots
+library(ggrepel)      # for plot with repelling labels
+```
+
+Load experiment data, as well as stimuli metadata:
+
+```{r, message = FALSE, warning = FALSE}
+# Experiment data:
+
+E1 <- read_csv('../data/E1_data.csv')
+E2 <- read_csv('../data/E2_data.csv')
+
+# Metadata on stimuli:
+
+stims <- read_csv('../data/stimuli.csv') |> 
+  rename_all(tolower)
+```
+
+For this exercise, I also prepared a set of variables that contain the order of levels we will want. You could type this out in the script, but it's error-prone to do this in an exercise, so I thought it would save us some time to prep this:
+
+```{r}
+metaphoricity_order <- read_lines('../data/metaphoricity_order.txt')
+creativity_order <- read_lines('../data/creativity_order.txt')
+```
+
+# Data preparation
+
+Select only those columns that we need — I generally recommend this as it makes a given data analysis much more cognitively manageable. Small objects are much easier to oversee and work with interactively. Why keep the columns you know you won't need? (And if you discover you need them later, you can always get back to the script and change this command)
+
+```{r}
+E1 <- select(E1,
+             ResponseId, NativeSpeaker, Item_1:Item_50)
+E2 <- select(E2,
+             ResponseId, NativeSpeaker, Item_1:Item_50)
+```
+
+Rename ID column to something shorter:
+
+```{r}
+E1 <- rename(E1, id = ResponseId)
+E2 <- rename(E2, id = ResponseId)
+```
+
+Next, let's check whether there are any non-native speakers. In our pre-registration document, we outlined that we will only include native speakers for this analysis.
+
+```{r}
+E1 |> count(NativeSpeaker)
+E2 |> count(NativeSpeaker)
+```
+
+There's one "No" case we will want to exclude for Experiment 2.
+
+We will exclude that case. We can either filter by `!str_detect(NativeSpeaker 'No')`, or perhaps easier without the negation, only the `"Yes"` cases, so, filtering by `str_detect(NativeSpeaker, 'Yes')`. We will then also get rid of the column as we don't need that anymore.
+
+```{r}
+E2 <- E2 |> 
+  filter(str_detect(NativeSpeaker, 'Yes')) |> 
+  select(-NativeSpeaker)
+
+# Get rid of column for E1 as well:
+
+E1 <- E1 |> select(-NativeSpeaker)
+```
+
+We use the `pivot_longer()` function to convert this into long format:
+
+```{r}
+E1 <- pivot_longer(E1, Item_1:Item_50,
+                   names_to = 'item',
+                   values_to = 'response')
+E2 <- pivot_longer(E2, Item_1:Item_50,
+                   names_to = 'item',
+                   values_to = 'response')
+```
+
+Make the response in an ordered variable. If it's a factor, then we can also convert that into a numeric variable, which will be useful later for computing means. Remember that factors are coded internally as numeric variables, just with additional "levels" information specifying what each number means.
+
+```{r}
+# Experiment 1:
+
+E1 <- mutate(E1,
+             response = factor(response,
+                               levels = metaphoricity_order),
+             response_num = as.numeric(response))
+
+# Experiment 2:
+
+E2 <- mutate(E2,
+             response = factor(response,
+                               levels = creativity_order),
+             response_num = as.numeric(response))
+```
+
+Check for and potentially exclude straightliners. 40 times the same response is 80%, which was our pre-registered exclusion criterion. Is anybody above that?
+
+```{r}
+# Experiment 1:
+
+E1 |> count(id, response) |> 
+  filter(n >= 40)
+
+# Experiment 2:
+
+E2 |> count(id, response) |> 
+  filter(n >= 40)
+```
+
+Not a single participant has more than 40 times the same response. So there aren't any straightliners by our criteria.
+
+Merge with stimulus characteristics:
+
+```{r}
+# Reduce stims file to less — only those things we need:
+
+stims <- select(stims, adj, noun, id, cosine)
+
+# Merge:
+
+E1 <- left_join(E1, stims, by = c('item' = 'id'))
+E2 <- left_join(E2, stims, by = c('item' = 'id'))
+```
+
+# Plot 1: Joy plot
+
+We'll show a ridge plot, or what some people seem to call a "joy plot". Because it gives me a lot of joy, I'll use that term. This plot is essentially just a bunch of stacked-on density curves, which makes it possible for us to see what cosine values (stimuli) people picked what response for. It's a very honest depiction of the relationship between our 7 scale points and the cosine measure, giving a lot of insight into the actual distribution and the overlap.
+
+Create a color gradient for the joy plot. The `colorRampPalette()` function spits out a function that will create a color ramp with the provided specifications. The function can then be used to create as many color gradient points in between these colors as desired.
+
+```{r}
+col_func <- colorRampPalette(c('lightblue', '#DE77AE'))
+
+# Test function:
+
+col_func(7)
+```
+
+Make the plot. There's a lot to unpack here. First, we use `geom_density_ridges()` from the `ggridges` package, with `alpha = 0.8` (80% opaque) so that the overlap between the different density curves is more visible. We map the continuous quantity, `cosine` onto the x-axis, and the categorical responses on the y-axis. So far so good.
+
+Then we have two scale functions. The first, `scale_x_continuous()` specifies the break points along the x-axis, for which we supply a sequence form 0 to 1 in a step-size of 0.2 to the `breaks` argument of that function, using the `seq()` sequence generation function. Then we can also set the limits to 0 and 1 for the x-axis. This will cut off the density curves, but that only makes sense because stimuli in this experiment cannot be outside of the range [0, 1]. Then we have `scale_fill_manual()` where we supply the output of our color ramp function we created above, `col_func()`. We specify `guide = 'none'` here because no legend is needed for these colors.
+
+Next comes something a bit tricky: the ggridge package doesn't draw density curves that are very high over the plot margin, so the top-most density curve is a bit cut off. Because of this I use `cord_cartesian(clip = 'off')` below, and also add more "top" margin in the long `theme()` command at the bottom by suppling `margin(t = 15)` to the `plot.margin` argument. This adds 15 scale points extra margin on top. Then we switch of the y-axis in the `theme()` command, as well as tweak the x- and y-axes.
+
+```{r, fig.width = 6.5, fig.height = 5}
+# Plot core:
+
+joy_p <- E1 |> 
+  ggplot(aes(x = cosine,
+             y = response,
+             fill = response)) +
+  geom_density_ridges(alpha = 0.8)
+
+# Axes and labels:
+
+joy_p <- joy_p +
+  scale_x_continuous(breaks = seq(0, 1, 0.2),
+                     limits = c(0, 1)) +
+  scale_fill_manual(values = col_func(7),
+                    guide = 'none') +
+  xlab('Cosine similarity') +
+  coord_cartesian(clip = 'off')
+
+# Cosmetics:
+
+joy_p <- joy_p +
+  theme_ridges() +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_text(face = 'bold'),
+        axis.title.x = element_text(face = 'bold', size = 16),
+        plot.margin = margin(t = 15))
+
+# Show and save:
+
+joy_p
+ggsave('../figures/pdf/metaphoricity_joy_plot.pdf', width = 6.5, height = 5)
+ggsave('../figures/png/metaphoricity_joy_plot.png', width = 6.5, height = 5)
+```
+
+# Plot 2: Model coefficients from ordinal mixed regression
+
+Load model. Since this takes a bit more time, we add `cache = TRUE` to the code chunk here so that we only have to do this for the first knit.
+
+```{r, cache = TRUE}
+load('../models/E1_cont_mdl.Rdata')
+```
+
+Check the model:
+
+```{r}
+E1_cont
+```
+
+Some explanation: this is the result of a ordinal mixed effects regression model. This is a cumulative ordinal model which assumes that the underlying quantity that is modelled is actually continuous, but then once a certain threshold is passed, a participant will click either 1, 2, or 3 and so on. These threshold estimates are the intercepts, and we can ignore them here. The fixed effects coefficients describe the change in the continuous quantity that determines whether somebody clicks 1, 2 etc. as a function of the estimated thresholds. So we can focus on just the fixed effects, and since these are the main variables from our study, we will want to show them in an easily graspable format.
+
+We could just supply the table: anybody skilled in the art of regression modeling should be able to interpret this... but we will mention the coefficient estimates in the write-up anyway, and tables are a bit boring, so let's make a graph. This has the added advantage that it gives a visual impression of the scale of the respective effects (and their uncertainties!) vis-a-vis each other.
+
+Just in case the model doesn't work for anyone:
+
+```{r}
+# load('../data/coefficients.RData') # object is called fixefs
+```
+
+Get the fixef effects and save them into a separate R object:
+
+```{r}
+fixefs <- fixef(E1_cont)
+```
+
+Check the fixed effects object:
+
+```{r}
+class(fixefs)
+```
+
+Aha, so this is a matrix. For it to be usable in ggplot2, it needs to be a tibble or data frame. We'll conver the matrix to a data frame first using the base R function `as.data.frame()`. We'll use that rather than the tidyverse function `as_data_frame()` because the base R function doesn't get rid of the row names, which we then make into a separate column using the function `rownames_to_column()`, and then we get rid of all the rows that have the string "`Intercept`" in them.
+
+```{r}
+coef_table <- fixef(E1_cont) |>
+  as.data.frame() |> 
+  rownames_to_column(var = 'coef') |> 
+  filter(!str_detect(coef, 'Intercept'))
+
+# Show:
+
+coef_table
+```
+
+Rename the coefficients so that they are prettier for plotting. Here we use the recoding function `case_when()` which works via a set of logical statements to the left of the tilde `~` and the label that this case should be replaced with to the right of the tilde.
+
+```{r}
+# Experiment 1:
+
+coef_table <- mutate(coef_table,
+                     coef = case_when(coef == 'PairAttestedattested' ~ 'Corpus attestation',
+                                      coef %in% 'AdjFreq_log10' ~ 'Adjective frequency',
+                                      coef %in% 'NounFreq_log10' ~ 'Noun frequency',
+                                      coef %in% 'Cosine' ~ 'Cosine similarity'))
+```
+
+Now, let's plot this! We map the `Estimate` onto the x-axis, and the different coefficients onto the y-axis (categorical variable: 4 coefficients). We'll use the `reorder()` function wrapped around the `coef` variable to specify that we want the levels to be reordered based on the mean. Otherwise it'll be ordered alphabetically, and that'll look messy.
+
+We can then add `geom_error()` bar, which will draw from the `xmin` and `xmax` aesthetics, which map onto the 2.5% and 97.5% percentile, thus encompassing the 95% credible interval. We add points, and I did a little searching to find that `pch = 15` is square-shaped. To make the points more visible, I increased the `size` argument to `3`. Then, it also makes sense to add a vertical line at 0 to see whether the 95% intervals overlap with zero or not.
+
+Then come a bunch of changes to axes. Notice that in contrast to abobve where we specified limits inside `scale_x_continuous()`, I specify it within `coord_cartesian()` here. It's also possible to do this in its own argument `+ xlim(-5, 1)`. Whatever works best for your mind!
+
+Finally lots of tweaking using `theme()`.
+
+```{r, fig.width = 6, fig.height = 4}
+# Setting up the plot basics:
+
+coef_p <- coef_table |>
+  ggplot(aes(x = Estimate,
+             y = reorder(coef, Estimate),
+             xmin = Q2.5, xmax = Q97.5)) +
+  geom_point(pch = 15, size = 3) +
+  geom_errorbar(width = 0.2) +
+  geom_vline(xintercept = 0, linetype = 2)
+
+# Axes:
+
+coef_p <- coef_p +
+  coord_cartesian(xlim = c(-5, 1)) +
+  scale_x_continuous(breaks = seq(-5, 1, 1)) +
+  xlab('Model coefficient') +
+  ylab(NULL)
+
+# Cosmetics:
+
+coef_p <- coef_p +
+  theme_classic() +
+  theme(axis.title.y = element_blank(),
+        axis.title.x = element_text(face = 'bold', size = 16,
+                                    margin = margin(t = 10, b = 0,
+                                                    r = 0, l = 0)),
+        axis.text.y = element_text(face = 'bold', size = 14),
+        axis.text.x = element_text(size = 12))
+
+# Show and save:
+
+coef_p
+ggsave('../figures/png/metaphoricity_coefficient_plot.png', coef_p,
+       width = 6, height = 4)
+ggsave('../figures/pdf/metaphoricity_coefficient_plot.pdf', coef_p,
+       width = 6, height = 4)
+```
+
+# Put plot 1 and plot 2 together
+
+Next, we can merge the two into a multi-plot array with two rows. For this we can use the `patchwork` `+` function, with an additional `plot_spacer()` so that the two plots have a small gap in between them. We want to add titles first though, using `ggtitle()` so that the plots can be differentiated into an "a)" and "b)" version in the published paper:
+
+```{r fig.width = 13, height = 5}
+# Add titles:
+
+joy_p <- joy_p + ggtitle('a) Cosine similarity by Likert scale choice')
+coef_p <- coef_p + ggtitle('b) Fixed effect coefficients from ordinal model') +
+  theme(plot.title = element_text(face = 'bold'),
+        plot.margin = margin(r = 15))
+
+# Merge plots using patchwork:
+
+both_p <- joy_p + plot_spacer() + coef_p +
+  plot_layout(nrow = 1, widths = c(5, 0.4, 4.5))
+
+# Show and save:
+
+both_p
+ggsave('../figures/png/metaphoricity_both_plots.png', both_p,
+       width = 13, height = 5)
+ggsave('../figures/pdf/metaphoricity_both_plots.pdf', both_p,
+       width = 13, height = 5)
+```
+
+# Plot 3: Scatterplot with repellent labels
+
+Next, we turn to the correlation between metaphoricity ratings (E1) and creativity ratings (E2). We will want to plot the average metaphoricity rating per item against the average creativity rating.
+
+Get item-based averages for E1 and E2:
+
+```{r}
+E1_items <- E1 |> 
+  group_by(item) |> 
+  summarize(metaphoricity = mean(response_num))
+
+E2_items <- E2 |> 
+  group_by(item) |> 
+  summarize(creativity = mean(response_num))
+```
+
+Merge both sets of averages:
+
+```{r}
+both <- left_join(E1_items, E2_items)
+```
+
+We will need to add the names of the stimuli if we want to display them on the plot. These are in the `stims` file we already used above:
+
+```{r}
+both <- left_join(both,
+                  select(stims, id, adj, noun),
+                  by = c('item' = 'id'))
+```
+
+Merge the adjective and noun pair into a string that has the complete stimulus (adjective + noun with a space in between). We do this so that we can plot the full stimuli in a readable format later. We can use `str_c()` to paste the `adj` column next to the `noun` column with an additional space in between.
+
+```{r}
+both <- mutate(both,
+               pair = str_c(adj, ' ', noun))
+```
+
+Create a subset of points to be plotted. The plot is particularly cramped for high values, so let's sample only 30% of the points above metaphoricity > 4. We use `set.seed(42)` here so that we always select the same values from the table using `sample_n()`. If we didn't do this, there'd be different labels each time.
+
+```{r}
+# Set seed for reproducible results:
+
+set.seed(42)
+
+# Get random subset of 10 from above > 3.5
+
+point_subset <- filter(both, metaphoricity > 3.5) |> 
+  sample_n(10) |> # why we need the seed
+  bind_rows(filter(both, metaphoricity < 3.5)) |> 
+  rename_all(str_to_title)
+
+# Check how many:
+
+point_subset
+```
+
+Show the correlation. Again we use `set.seed()` here as `geom_text_repel()` has an element of randomness in its search for the best "repelling" label positions.
+
+The `geom_text_repel()` geom below comes from the `ggrepel` package. Don't think I knew all those arguments! - This is stuff I had to look up myself as I don't use that package so super often.
+
+```{r, fig.width = 8, fig.height = 6}
+set.seed(666) # for sampling subset
+
+# Plot core:
+
+scatter_p <- both |>
+  rename_all(str_to_title) |> 
+  ggplot(aes(x = Metaphoricity, y = Creativity)) +
+  geom_point(alpha = 0.8, size = 3, col = 'purple') +
+  geom_text_repel(data = point_subset,
+                  mapping = aes(label = Pair),
+                  max.overlaps = Inf,
+                  box.padding = 0.6,
+                  min.segment.length = 0)
+
+# Axes and labels:
+
+scatter_p <- scatter_p +
+  scale_x_continuous(limits = c(1, 7),
+                     breaks = 1:7) +
+  scale_y_continuous(limits = c(1, 7),
+                     breaks = 1:7)
+
+# Cosmetics:
+
+scatter_p <- scatter_p +
+  theme_classic() +
+  theme(axis.title.y = element_text(face = 'bold', size = 16,
+                                    margin = margin(t = 0, b = 0,
+                                                    r = 10, l = 0)),
+        axis.title.x = element_text(face = 'bold', size = 16,
+                                    margin = margin(t = 10, b = 0,
+                                                    r = 0, l = 0)),
+        axis.text.y = element_text(face = 'bold', size = 14),
+        axis.text.x = element_text(face = 'bold', size = 14))
+
+# Show and save:
+
+scatter_p
+ggsave(plot = scatter_p,
+       filename = '../figures/png/metaphoricity_creativity_correlation.png',
+       width = 8, height = 6)
+ggsave(plot = scatter_p,
+       filename = '../figures/pdf/metaphoricity_creativity_correlation.pdf',
+       width = 8, height = 6)
+```
+
+This completes this analysis.
+

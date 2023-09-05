@@ -1,0 +1,154 @@
+---
+title: "Meta-analysis of synesthetic metaphor tables"
+author: "Bodo"
+date: "2023-07-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This script presents the results of an ongoing meta-analysis of synesthetic metaphors, expressions such as the adjective-noun pair *sweet melody* which combines a taste word (*sweet*) with a sound-related word (*melody*).
+
+A number of people have performed corpus analysis counting how many crossmodal expressions fit a proposed "hierarchy of the senses": touch < taste < smell < sound < sight
+
+In this meta-analysis, we compiled all sorts of tables listing token counts and then counted the proportion of "hierarchy-consistent" cases, i.e., how many of the observed tokens of synesthetic metaphors are consistent with the hierarchy? We will look at this, and then see how much particular mappings, especially touch->sound and sight->sound may matter.
+
+What we want to show is the distribution of the proportion of hierarchy-consistent cases across studies, and then again the same without the cells in question. We will also want to plot the results from a logistic regression analysis on top of these distributions.
+
+# Setup
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)     # for data processing and visualization
+library(brms)          # for fitting bayesian models
+library(patchwork)     # for multi-plot arrays
+```
+
+Load the data:
+
+```{r warning = FALSE, message = FALSE}
+syn <- read_csv('../data/winter_strik_lievers_synesthesia_meta_analysis.csv')
+```
+
+Load the pre-compiled models. The model `proportion_model` is a logistic regression fitted on the proportions including touch->sound and sight->sound, the model `prop_no_TS_no_VS_mdl` is the proportion without these cells.
+
+```{r}
+load('../models/proportion_model.RData')
+load('../models/prop_no_TS_no_VS_mdl.RData')
+```
+
+# Calculate missing statistics
+
+Let's look at the data together:
+
+```{r}
+syn
+```
+
+The column `proportion` is simply the `hierarchy_tokens` column divided by the `total` column. We need to compute the missing proportion of hierarchy-consistent tokens that exclude touch->sound and sight->sound, for which we use the column called `hierarchy_tokens_noTS_noVS`. Let's call the resultant proportions `prop_red` for "proportion reduced".
+
+```{r}
+syn <- mutate(syn,
+              prop_red = hierarchy_tokens_noTS_noVS / total)
+```
+
+# Density plot of proportions
+
+Make a plot of this, which we'll save in an object called `prop_p`. We'll add the 95% credible interval of the model's estimate for the proportion of hierarchy-consistent cases into the plot as well. This way people can see the raw data and the model.
+
+The informationa bout the model estimates comes from applying the `fixef()` function (for extracting fixed effects) to the logistic regression model:
+
+```{r}
+fixefs <- fixef(prop_mdl)
+fixefs_red <- fixef(prop_no_TS_no_VS_mdl)
+
+# Show:
+
+fixefs
+```
+
+Then we build the plot. We'll plot two separate geoms with the density curve, each time drawing from a different column. Then we use `geom_vline()` to add a vertical line for chance, which constitutes 11/20 in this case (for reasons that we don't need to get into here). We use the `annotate()` function profusely. This function can plot all sorts of extra elements for geoms specified in the first argument (below: `segment`, `point`, `text`, `label`). Notice the difference between `text` and `label` in the plot below and compare it to the outcome of the plot. To plot the coordinates for the 95% credible intervals, we use the content of the `fixefs` object (from model including all cells) and the `fixefs_red` object (from model excluding touch->sound and sight->sound).
+
+Important technical detail that goes beyond the content of this workshop: we need to wrap `plogis()` around the estimates from the model because the model reports all values in log odds, otherwise known as "logits". The `plogis()` function applies the logistic regression function to these logits so that they can be plotted on the more interpretable proportion scale.
+
+```{r warning = FALSE, message = FALSE, fig.width = 6.5, fig.height = 4}
+# Core of plot:
+
+prop_p <- syn %>% 
+  ggplot() +
+  geom_density(mapping = aes(x = proportion),
+               fill = 'purple', alpha = 0.8) +
+  geom_density(mapping = aes(x = prop_red),
+               fill = 'pink', alpha = 0.8) +
+  geom_vline(xintercept = 0.55, linetype = 'dashed')
+
+# Annotations:
+
+prop_p <- prop_p +
+  annotate('segment',
+           x = plogis(fixefs[, 'Q2.5']),
+           xend = plogis(fixefs[, 'Q97.5']),
+           y = 0.4, yend = 0.4,
+           arrow = arrow(ends = 'both', angle = 90, length = unit(.2, 'cm'))) +
+  annotate('point',
+           x = plogis(fixefs[, 'Estimate']),
+           y = 0.4, pch = 15, size = 3) +
+  annotate('segment',
+           x = plogis(fixefs_red[, 'Q2.5']),
+           xend = plogis(fixefs_red[, 'Q97.5']),
+           y = 0.4, yend = 0.4,
+           arrow = arrow(ends = 'both', angle = 90, length = unit(.2, 'cm'))) +
+  annotate('point',
+           x = plogis(fixefs_red[, 'Estimate']),
+           y = 0.4, pch = 15, size = 3)
+  
+
+# Add annotations, axes, labels to plot:
+
+prop_p <- prop_p +
+  annotate('text',
+           x = 0.555,
+           y = 9,
+           label = 'Chance:\n55% = 11/20 cells',
+           hjust = 0) +
+  annotate('label',
+           x = 0.45,
+           y = 2.1,
+           fill = 'pink',
+           label = 'Without:\ntouch->sound\nsight->sound',
+           hjust = 1) +
+  xlab('Proportion of hierarchy consistent cases') +
+  ylab('Density') +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 10)) +
+  scale_x_continuous(limits = c(0.2, 1),
+                     breaks = seq(0.2, 1, 0.1))
+
+# Cosmetic tweaking:
+  
+prop_p <- prop_p +
+  theme_classic() +
+  theme(axis.title = element_text(face = 'bold',
+                                  size = 12),
+        axis.title.x = element_text(margin = margin(t = 12)),
+        axis.title.y = element_text(margin = margin(r = 8)))
+
+# Show plot in markdown and also save externally outside of R:
+
+prop_p
+ggsave(plot = prop_p,
+       filename = '../figures/png/synesthesia_meta_analysis_average_proportion.png',
+       width = 6.5, height = 4)
+ggsave(plot = prop_p,
+       filename = '../figures/pdf/synesthesia_meta_analysis_average_proportion.pdf',
+       width = 6.5, height = 4)
+```
+
+This completes this analysis.
